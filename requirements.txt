@@ -8,4 +8,3 @@ streamlit
 scikit-learn
 matplotlib
 plotly
-pickle
