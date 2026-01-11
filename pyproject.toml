@@ -14,7 +14,9 @@ dependencies = [
   "streamlit",
   "scikit-learn",
   "matplotlib",
-  "plotly"
+  "plotly",
+  "ipykernel",
+  "pickle"
 ]
 
 [project.optional-dependencies]

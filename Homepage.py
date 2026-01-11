@@ -2,237 +2,18 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import math
-
-from sklearn.metrics import log_loss
+import pickle
 from sklearn.linear_model import LogisticRegression
-from sklearn.pipeline import Pipeline
+
 from sklearn.preprocessing import StandardScaler, SplineTransformer, OneHotEncoder
 import matplotlib.pyplot as plt
 import plotly.graph_objects as go
+from src.src import get_expected_score
 
 # ---------- Helper: compute Massey ratings ----------
 OUTPUT_FILE = "./data/cleaned_ttc_scores.csv"
 df = read_data = pd.read_csv(OUTPUT_FILE)
-
-
-def get_expected_score(player_a_rating: float, player_b_rating: float) -> str:
-    """
-    Given two player ratings, compute expected score for player A
-    using the Massey method formula.
-    """
-    rating_diff = player_a_rating - player_b_rating
-
-    rating_diff = max(-8.0, rating_diff)
-    rating_diff = min(8.0, rating_diff)
-
-    if rating_diff < 0:
-        rating_diff = abs(math.floor(rating_diff))
-        match_result = "L"
-
-    else:
-        rating_diff = math.ceil(rating_diff)
-        match_result = "W"
-
-    expected_score_loser = 8 - rating_diff
-
-    expected_score = match_result + " " + str(8) + "-" + str(expected_score_loser)
-    return expected_score
-
-
-def match_results_summary(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Given a dataframe with columns:
-    ['player_1', 'player_2', 'player_1_games_won', 'player_2_games_won']
-
-    Returns a dataframe with one row per player containing:
-    ['matches_won', 'matches_lost', 'matches_drawn', ...]
-    """
-
-    # Results from player_1 perspective
-    matches_won = df[~df.IsDraw].groupby("Winner").size()
-    matches_won.index.name = "player"
-    matches_won.name = "matches_won"
-
-    matches_lost = df[~df.IsDraw].groupby("Loser").size()
-    matches_lost.index.name = "player"
-    matches_lost.name = "matches_lost"
-
-    matches_drawn = pd.concat(
-        [df[df.IsDraw]["Winner"], df[df.IsDraw]["Loser"]]
-    ).value_counts()
-    matches_drawn.index.name = "player"
-    matches_drawn.name = "matches_drawn"
-
-    match_dates = pd.concat(
-        [
-            df[["Date", "Winner"]].rename(columns={"Winner": "player"}),
-            df[["Date", "Loser"]].rename(columns={"Loser": "player"}),
-        ]
-    )
-    last_match_date = match_dates.groupby("player")["Date"].max()
-    last_match_date.name = "last_match_date"
-    # .dt.date
-
-    summary = pd.concat(
-        [matches_won, matches_lost, matches_drawn, last_match_date], axis=1
-    )
-    summary = summary.fillna(0).reset_index()
-    summary = summary.astype(
-        {
-            "matches_won": "int64",
-            "matches_lost": "int64",
-            "matches_drawn": "int64",
-            "last_match_date": "string",
-        }
-    )
-    summary["num_matches"] = (
-        summary["matches_won"] + summary["matches_lost"] + summary["matches_drawn"]
-    )
-    summary["win_percentage"] = summary["matches_won"] / summary["num_matches"]
-    summary["win_percentage"] = 100 * summary["win_percentage"].round(3)
-    summary["record"] = (
-        summary["matches_won"].astype(str)
-        + "-"
-        + summary["matches_lost"].astype(str)
-        + "-"
-        + summary["matches_drawn"].astype(str)
-    )
-    summary["points_percentage"] = (
-        3 * summary["matches_won"] + 1 * summary["matches_drawn"]
-    ) / (summary["num_matches"] * 3)
-
-    summary.sort_values(
-        by=["points_percentage", "matches_won"], ascending=[False, False], inplace=True
-    )
-
-    return summary
-
-
-def compute_massey_ratings(df: pd.DataFrame, keep_steps: bool = True) -> pd.DataFrame:
-    """
-    Compute Massey ratings from dataframe with:
-    Winner, Loser, WinnerGames, LoserGames
-    """
-    if df is None or df.empty:
-        return pd.DataFrame()
-
-    df["Date"] = pd.to_datetime(df["Date"])
-    df.sort_values(by="Date", ascending=True, inplace=True)
-
-    players = sorted(set(df["Winner"]).union(set(df["Loser"])))
-    n = len(players)
-
-    if n < 2:
-        return pd.DataFrame()
-
-    # Getting dictionary of player name and their playerid
-    # Eg: {"Peter Tea": 0, "Kelvin Lu":1, ...}
-    idx = {player_name: index_int for index_int, player_name in enumerate(players)}
-
-    M = np.zeros((n, n), float)
-    b = np.zeros(n, float)
-
-    ratings_by_time_arr = []
-
-    for row_index, row in df.iterrows():
-        # for iterrows, we get the following in each iteration:
-        # (index, Series)
-        # row = df.iloc[0,:]
-        player1_name, player2_name = row["Winner"], row["Loser"]
-        games_player1, games_player2 = row["WinnerGames"], row["LoserGames"]
-        margin = games_player1 - games_player2
-
-        player1_id, player2_id = idx[player1_name], idx[player2_name]
-        M[player1_id, player1_id] += 1
-        M[player2_id, player2_id] += 1
-        M[player1_id, player2_id] -= 1
-        M[player2_id, player1_id] -= 1
-        b[player1_id] += margin
-        b[player2_id] -= margin
-
-        if keep_steps:
-            # Impose constraint: sum(ratings)=0
-            M[-1, :] = 1.0
-            b[-1] = 0.0
-            # Compute least-squares solution to linear system || b-ax|| is minimized
-            # Finds "x" such that M * x = b
-            try:
-                player1_prev_rating = ratings[player1_id]
-                player2_prev_rating = ratings[player2_id]
-            except NameError:
-                player1_prev_rating = 0.0
-                player2_prev_rating = 0.0
-
-            ratings = np.linalg.lstsq(M, b, rcond=None)[0]
-            # | player | date | rating | score | result | opponent |
-            expected_result_player1 = player1_prev_rating - player2_prev_rating
-
-            ratings_by_time_arr.append(
-                {
-                    "Date": row["Date"],
-                    "player": player1_name,
-                    "prev_rating": round(player1_prev_rating, 3),
-                    "rating": round(ratings[player1_id], 3),
-                    "score": row["Score"],
-                    "expected_result": get_expected_score(
-                        player1_prev_rating, player2_prev_rating
-                    ),
-                    "result": "W" if row["IsDraw"] == False else "D",
-                    "opponent": player2_name,
-                    "opponent_prev_rating": round(player2_prev_rating, 3),
-                }
-            )
-            ratings_by_time_arr.append(
-                {
-                    "Date": row["Date"],
-                    "player": player2_name,
-                    "rating": round(ratings[player2_id], 3),
-                    "prev_rating": round(player2_prev_rating, 3),
-                    "score": row["Score"],
-                    "expected_result": get_expected_score(
-                        player2_prev_rating, player1_prev_rating
-                    ),
-                    "result": "L" if row["IsDraw"] == False else "D",
-                    "opponent": player1_name,
-                    "opponent_prev_rating": round(player1_prev_rating, 3),
-                }
-            )
-
-    # Impose constraint: sum(ratings)=0
-    M[-1, :] = 1.0
-    b[-1] = 0.0
-
-    # Compute least-squares solution to linear system || b-ax|| is minimized
-    # Finds "x" such that M * x = b
-    ratings = np.linalg.lstsq(M, b, rcond=None)[0]
-
-    player_ratings_dict = {player: rating for player, rating in zip(players, ratings)}
-    player_ratings_df = pd.DataFrame.from_dict(
-        player_ratings_dict, orient="index", columns=["massey_rating"]
-    )
-    player_ratings_df.reset_index(inplace=True)
-    player_ratings_df.rename(columns={"index": "player"}, inplace=True)
-    player_ratings_df["massey_rating"] = player_ratings_df["massey_rating"].round(2)
-    player_ratings_df.sort_values(by="massey_rating", ascending=False, inplace=True)
-
-    matches_played = pd.concat([df["Winner"], df["Loser"]]).value_counts()
-    matches_played.index.name = "player"
-    matches_played.name = "matches_played"
-
-    full_df = player_ratings_df.merge(
-        matches_played, left_on="player", right_on="player", how="left"
-    )
-
-    # Minimum matches played filter
-    full_df = full_df[full_df["matches_played"] >= 5]
-    full_df.reset_index(drop=True, inplace=True)
-
-    ratings_by_time_arr_df = pd.DataFrame(ratings_by_time_arr)
-    # ratings_by_time_arr_df[ratings_by_time_arr_df["player"]=="Peter Tea"]
-    # ratings_by_time_arr_df[ratings_by_time_arr_df["player"]=="shane kafka"]
-
-    return full_df, ratings_by_time_arr_df
-
+player_summary_df = pd.read_csv("./data/player_summary.csv")
 
 # ---------- Streamlit App ----------
 
@@ -253,15 +34,8 @@ The ratings are updated based on the quality of opponents faced, as well as the 
     """
 )
 
-final_massey_rating_df, all_massey_ratings_df = compute_massey_ratings(df)
-match_results_summary_df = match_results_summary(df)
 
-massey_df = final_massey_rating_df.merge(
-    match_results_summary_df, left_on="player", right_on="player", how="left"
-)
-massey_df = massey_df[
-    ["player", "massey_rating", "record", "points_percentage", "last_match_date"]
-]
+massey_df = pd.read_csv("./data/final_massey_ratings.csv")
 
 st.caption(
     "points_percentage is the % of points won from all matches played. Ladder rules state that a Win earns 3 points, a Draw earns 1 point and a Loss earns 0 points. "
@@ -278,9 +52,11 @@ st.write(
     """
 )
 
+all_massey_ratings_df = pd.read_csv("./data/all_massey_ratings_over_time.csv")
+
 select_player_ratings_plot = st.multiselect(
     "Select players to plot their rating over time:",
-    set(final_massey_rating_df["player"]),
+    set(massey_df["player"]),
     max_selections=5,
     accept_new_options=True,
     placeholder="Select contact method...",
@@ -350,69 +126,6 @@ fig.update_layout(
 st.plotly_chart(fig, use_container_width=True)
 
 
-# ---------- PREDICT MATCH OUTCOME ----------
-spline_fit_df = all_massey_ratings_df[["prev_rating", "opponent_prev_rating", "result"]]
-
-spline_fit_df["diff_rating"] = (
-    spline_fit_df["prev_rating"] - spline_fit_df["opponent_prev_rating"]
-)
-spline_fit_df["result_binary"] = np.where(spline_fit_df["result"] == "W", 1, 0)
-spline_fit_df = spline_fit_df[spline_fit_df["result"] != "D"]
-
-
-# spline_fit_df1 = all_massey_ratings_df[
-#     ["player", "opponent", "Date", "prev_rating", "opponent_prev_rating"]
-# ]
-# spline_fit_df2 = all_massey_ratings_df[
-#     ["player", "opponent", "Date", "prev_rating", "opponent_prev_rating"]
-# ].rename(
-#     columns={
-#         "player": "opponent",
-#         "prev_rating": "opponent_prev_rating",
-#         "opponent": "player",
-#         "opponent_prev_rating": "prev_rating",
-#     }
-# )
-
-# spline_fit_df = (
-#     pd.concat([spline_fit_df1, spline_fit_df2])
-#     .reset_index(drop=True)
-#     .sort_values(by=["Date"], ascending=[True])
-# )
-
-
-X = spline_fit_df[["diff_rating"]]
-y = spline_fit_df["result_binary"]
-
-
-# 2. Define the Spline Transformer
-# degree=3 for cubic splines, n_knots sets the number of segments
-# knots='uniform' places knots evenly, but you can also define custom knot locations
-spline_transformer = SplineTransformer(
-    degree=2, n_knots=5, knots="uniform", include_bias=False
-)
-
-# 3. Define the Logistic Regression model
-# We set C to a high value to reduce regularization, focusing on the spline fit
-logistic_regression = LogisticRegression(solver="liblinear", C=1000)
-
-# 4. Create a pipeline
-# The pipeline first transforms the data, then fits the logistic model
-model = Pipeline([("spline", spline_transformer), ("logistic", logistic_regression)])
-
-# 5. Fit the model
-model.fit(X, y)
-
-# Evaluate log-loss on training data
-y_pred_proba = model.predict_proba(X)
-
-# Calculate the log loss
-loss = log_loss(y, y_pred_proba)
-
-# st.success(f"Training set Log Loss: {loss}")
-print(f"Training set Log Loss: {loss}")
-
-
 # 6. (Optional) Visualize the results
 # Plotting the predicted probability curve over the range of X
 
@@ -466,6 +179,11 @@ st.write(
 Use latest ratings to predict match outcomes:
     """
 )
+
+filename = "./models/massey_ratings_to_pred_win_model.pkl"
+# Load the model from disk
+with open(filename, "rb") as file:
+    model = pickle.load(file)
 
 
 def round_to_nearest_5(n):
