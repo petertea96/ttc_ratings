@@ -1,0 +1,10 @@
+flask>=2.2
+numpy>=2
+scipy>=1.8.1
+selenium
+webdriver_manager
+pandas
+streamlit
+scikit-learn
+matplotlib
+plotly
