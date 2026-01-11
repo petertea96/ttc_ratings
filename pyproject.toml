@@ -1,0 +1,31 @@
+[project]
+name = "ttc_ratings"
+version = "1.0.0"
+description = "Massey ratings for rec level tennis."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "flask>=2.2",
+  "numpy>=2",
+  "scipy>=1.8.1",
+  "selenium",
+  "webdriver_manager",
+  "pandas",
+  "streamlit",
+  "scikit-learn",
+  "matplotlib",
+  "plotly"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.4",
+    "ruff",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/"]
