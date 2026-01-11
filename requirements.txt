@@ -78,7 +78,6 @@ tornado==6.5.4
 traitlets==5.14.3
 trio==0.32.0
 trio-websocket==0.12.2
--e file:///Users/p.tea/Documents/ttc_ratings
 typing-extensions==4.15.0
 tzdata==2025.3
 urllib3==2.6.2
